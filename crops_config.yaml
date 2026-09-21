@@ -1,0 +1,29 @@
+crops:
+  lua:
+    display_name: Lúa
+    growth:
+      model_path: models/weights/lua_v1.pt
+      classes:
+        0: sinh_truong
+        1: tro_bong
+        2: chin
+      advice_path: advice/lua.json
+    disease:
+      model_path: models/weights/lua_disease_v1.pt
+      classes:
+        0: than_vang
+        1: dao_on
+        2: chay_la
+        3: dom_van
+        4: dom_nau
+      advice_path: advice/lua_disease.json
+  xoai:
+    display_name: Xoài
+    growth:
+      model_path: models/weights/xoai_v1.pt
+      classes:
+        0: sinh_truong
+        1: ra_hoa
+        2: phat_trien_qua
+      advice_path: advice/xoai.json
+    disease: null
