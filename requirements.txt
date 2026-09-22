@@ -3,3 +3,4 @@ ultralytics
 google-generativeai
 pillow
 opencv-python-headless
+gradio
