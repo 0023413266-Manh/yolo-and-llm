@@ -51,27 +51,36 @@ LOADED_MODELS = load_all_yolo_models()
 # ==========================================
 def get_working_gemini_model(api_key):
     genai.configure(api_key=api_key.strip())
+    
+    # Đặt gemini-3.5-flash lên đầu danh sách ưu tiên
     preferred_models = [
-        'gemini-2.0-flash',
+        'gemini-3.5-flash',
+        'gemini-3.5-flash-lite',
         'gemini-1.5-flash',
-        'gemini-1.5-pro'
+        'gemini-2.0-flash'
     ]
+    
     try:
+        # Lấy danh sách model API hỗ trợ thực tế trong tài khoản
         available = [
             m.name.replace('models/', '')
             for m in genai.list_models()
             if 'generateContent' in m.supported_generation_methods
         ]
+        
+        # Chọn model ưu tiên có sẵn trong tài khoản
         for pref in preferred_models:
             if pref in available:
                 return genai.GenerativeModel(pref)
+                
         if available:
             return genai.GenerativeModel(available[0])
+            
     except Exception as e:
-        print(f"⚠️ Không liệt kê được danh sách model Gemini: {e}")
+        print(f"⚠️ Không kiểm tra được danh sách model Gemini: {e}")
 
-    return genai.GenerativeModel('gemini-1.5-flash')
-
+    # Mặc định gọi trực tiếp gemini-3.5-flash
+    return genai.GenerativeModel('gemini-3.5-flash')
 # ==========================================
 # 3. HÀM XÁC ĐỊNH TÊN CÂY TRỒNG
 # ==========================================
