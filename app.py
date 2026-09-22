@@ -1,50 +1,60 @@
 import os
 import glob
 import re
-import gradio as gr
+import streamlit as st
 from ultralytics import YOLO
 import google.generativeai as genai
 from PIL import Image
- 
+
 # ==========================================
-# 1. TỰ ĐỘNG NẠP FILE WEIGHTS YOLO
+# CẤU HÌNH TRANG STREAMLIT
 # ==========================================
-def find_weight_path(pattern):
-    matches = glob.glob(f"/kaggle/input/**/{pattern}", recursive=True)
-    return matches[0] if matches else None
- 
-MODEL_PATHS = {
-    "lua_stage": find_weight_path("*lua-lua/**/best*.pt"),
-    "xoai_stage": find_weight_path("*best*(xoai)*.pt"),
-    "lua_disease": find_weight_path("*disease_v1*/**/best.pt")
-}
- 
-LOADED_MODELS = {}
-print("⏳ Đang nạp hệ thống mô hình YOLO...")
-for k, path in MODEL_PATHS.items():
-    if path and os.path.exists(path):
-        try:
-            LOADED_MODELS[k] = YOLO(path)
-            print(f"  ✅ Nạp thành công [{k}]: {path}")
-        except Exception as e:
-            print(f"  ❌ Lỗi nạp {k}: {e}")
- 
+st.set_page_config(
+    page_title="YOLO & Gemini - Nhận diện & Tư vấn Cây trồng",
+    page_icon="🌾",
+    layout="wide"
+)
+
+# ==========================================
+# 1. TỰ ĐỘNG NẠP FILE WEIGHTS YOLO (TÌM TRONG ĐƯỜNG DẪN DỰ ÁN)
+# ==========================================
+@st.cache_resource
+def load_all_yolo_models():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    def find_weight_path(pattern):
+        # Tìm file weights trong thư mục dự án thay vì /kaggle/input
+        matches = glob.glob(os.path.join(base_dir, "**", pattern), recursive=True)
+        return matches[0] if matches else None
+
+    model_paths = {
+        "lua_stage": find_weight_path("*lua*.pt"),
+        "xoai_stage": find_weight_path("*xoai*.pt"),
+        "lua_disease": find_weight_path("*disease*.pt"),
+        "mit_stage": find_weight_path("*mit*.pt") # Dự phòng khi bạn thêm weights Mít
+    }
+
+    loaded_models = {}
+    for k, path in model_paths.items():
+        if path and os.path.exists(path):
+            try:
+                loaded_models[k] = YOLO(path)
+                print(f"✅ Nạp thành công [{k}]: {path}")
+            except Exception as e:
+                print(f"❌ Lỗi nạp {k}: {e}")
+    return loaded_models
+
+LOADED_MODELS = load_all_yolo_models()
+
 # ==========================================
 # 2. HÀM TÌM MODEL GEMINI ĐANG HOẠT ĐỘNG
 # ==========================================
 def get_working_gemini_model(api_key):
     genai.configure(api_key=api_key.strip())
- 
-    # Model cũ (1.5/2.0/2.5) đã hoặc sắp bị Google ngừng hỗ trợ tính đến
-    # thời điểm hiện tại -> ưu tiên bản 3.x còn đang hoạt động trước,
-    # giữ vài bản cũ ở cuối chỉ để dự phòng nếu tài khoản có quyền truy
-    # cập đặc biệt.
     preferred_models = [
-        'gemini-3.5-flash-lite',   # 500 lượt/ngày — dùng để code/test
-        'gemini-3.5-flash',
-        'gemini-3.6-flash',
         'gemini-2.0-flash',
         'gemini-1.5-flash',
+        'gemini-1.5-pro'
     ]
     try:
         available = [
@@ -54,15 +64,14 @@ def get_working_gemini_model(api_key):
         ]
         for pref in preferred_models:
             if pref in available:
-                return genai.GenerativeModel(pref), pref
+                return genai.GenerativeModel(pref)
         if available:
-            return genai.GenerativeModel(available[0]), available[0]
+            return genai.GenerativeModel(available[0])
     except Exception as e:
         print(f"⚠️ Không liệt kê được danh sách model Gemini: {e}")
- 
-    # Mặc định dùng bản đang hoạt động thay vì model cũ có thể đã bị gỡ
-    return genai.GenerativeModel('gemini-3.5-flash'), 'gemini-3.5-flash'
- 
+
+    return genai.GenerativeModel('gemini-1.5-flash')
+
 # ==========================================
 # 3. HÀM XÁC ĐỊNH TÊN CÂY TRỒNG
 # ==========================================
@@ -76,143 +85,124 @@ BẮT BUỘC: Không viết câu dài, không giải thích, không viết tiế
         res = model.generate_content([pil_img, prompt])
         if res and res.text:
             text = res.text.strip()
-            # Lọc sạch ký tự markdown (*, #, _, -)
             clean_text = re.sub(r'[*#_`~]', '', text)
-            lines = [l.strip() for l in clean_text.split('\n') if l.strip() and not l.lower().startswith('thinking')]
+            lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
             if lines:
                 name = lines[0]
-                # Lọc bỏ các tiền tố thừa
                 name = re.sub(r'^(tên cây|đây là cây|đây là|cây trồng|loại cây):\s*', '', name, flags=re.IGNORECASE).strip()
                 if not name.lower().startswith('cây'):
                     name = f"Cây {name}"
                 return name
-        # Gemini trả lời rỗng (không exception, nhưng cũng không có text)
-        print("⚠️ Gemini trả lời rỗng khi nhận diện tên cây.")
         return "Cây chưa xác định (Gemini trả lời rỗng)"
     except Exception as e:
-        # In lỗi RA CẢ giao diện thay vì chỉ console, để không còn phải
-        # đoán mò khi gặp lỗi như lần trước.
-        print(f"Lỗi đọc tên cây: {e}")
-        return f"Cây chưa xác định (lỗi Gemini: {e})"
- 
+        return f"Cây chưa xác định (Lỗi Gemini: {e})"
+
 # ==========================================
 # 4. HÀM XỬ LÝ CHÍNH
 # ==========================================
 def process_analysis(pil_img, api_key):
-    if pil_img is None:
-        return None, "❌ Vui lòng tải ảnh lên!"
- 
-    if not api_key or len(api_key.strip()) < 10:
-        return pil_img, "⚠️ **CHƯA BẬT GEMINI:** Vui lòng nhập Gemini API Key hợp lệ vào ô bên trái!"
- 
-    try:
-        # BƯỚC 1: Kết nối Gemini
-        g_model, model_name = get_working_gemini_model(api_key)
- 
-        # BƯỚC 2: Nhận diện chính xác tên cây
-        plant_name = get_clean_plant_name(g_model, pil_img)
-        p_lower = plant_name.lower()
- 
-        # Nếu chính bước nhận diện tên đã lỗi/rỗng -> dừng sớm, hiện rõ
-        # nguyên nhân thay vì đi tiếp và báo nhầm "chưa nằm trong dataset".
-        if plant_name.startswith("Cây chưa xác định ("):
-            return pil_img, f"❌ **Không nhận diện được cây:** {plant_name}\n\nKiểm tra lại API key hoặc thử ảnh khác."
- 
-        # Kiểm tra cây có thuộc Lúa hoặc Xoài hay không
-        is_supported = any(k in p_lower for k in ["lúa", "xoài", "lua", "xoai"])
- 
-        # BƯỚC 3: NẾU LÀ CÂY KHÁC (Ớt, Mít, Chôm Chôm, Bưởi...) -> TẮT YOLO, KHÔNG VẼ KHUNG
-        if not is_supported:
-            msg = f"🔍 **Kết quả nhận diện:** Đây là **{plant_name}**.\n\n"
-            msg += "⚠️ **THÔNG BÁO:** Hệ thống hiện tại chỉ hỗ trợ khoanh vùng và tư vấn chuyên sâu cho **Cây Lúa** và **Cây Xoài**.\n"
-            msg += f"Do **{plant_name}** chưa nằm trong dữ liệu huấn luyện (Dataset YOLO) của hệ thống nên sẽ **không vẽ khung** và **không đưa ra bài tư vấn**."
- 
-            # Trả về ảnh gốc hoàn toàn KHÔNG VẼ KHUNG
-            return pil_img, msg
- 
-        # BƯỚC 4: NẾU ĐÚNG CÂY LÚA HOẶC CÂY XOÀI -> BẬT YOLO KHOANH VÙNG & TƯ VẤN
-        annotated_img = pil_img
-        yolo_text = ""
-        best_match = None
-        highest_conf = -1.0
- 
-        for m_key, model in LOADED_MODELS.items():
-            results = model.predict(pil_img, conf=0.35, imgsz=640)
-            boxes = results[0].boxes
-            if len(boxes) > 0:
-                top_box = sorted(boxes, key=lambda x: float(x.conf[0]), reverse=True)[0]
-                conf = float(top_box.conf[0])
-                if conf > highest_conf:
-                    highest_conf = conf
-                    best_match = {
-                        "m_key": m_key,
-                        "results": results,
-                        "box": top_box,
-                        "conf": conf
-                    }
- 
-        if best_match:
-            m_key = best_match["m_key"]
-            raw_label = LOADED_MODELS[m_key].names[int(best_match["box"].cls[0])]
-            conf = best_match["conf"]
-            annotated_img = best_match["results"][0].plot()[:, :, ::-1]
- 
-            LUA_STAGE_MAP = {'sinh_truong': '🌱 Giai đoạn Mạ / Đẻ nhánh', 'tro_bong': '🌾 Giai đoạn Trỗ bông', 'chin': '🌾 Giai đoạn Lúa chín'}
-            XOAI_STAGE_MAP = {'sinh_truong': '🌿 Phát triển thân lá', 'ra_hoa': '🌸 Giai đoạn Ra hoa', 'phat_trien_qua': '🥭 Giai đoạn Quả lớn'}
-            LUA_DISEASE_MAP = {'than_vang': '⚠️ Bệnh Thán vàng', 'dao_on': '⚠️ Bệnh Đạo ôn', 'chay_la': '⚠️ Bệnh Cháy lá', 'dom_van': '⚠️ Bệnh Đốm vằn', 'dom_nau': '⚠️ Bệnh Đốm nâu'}
- 
-            if m_key == "lua_stage": pretty = LUA_STAGE_MAP.get(raw_label, raw_label)
-            elif m_key == "xoai_stage": pretty = XOAI_STAGE_MAP.get(raw_label, raw_label)
-            else: pretty = LUA_DISEASE_MAP.get(raw_label, raw_label)
- 
-            yolo_text = f"🎯 **Khoanh vùng bởi YOLO:** {pretty} (Độ tin cậy: {conf:.1%})\n"
- 
-        # Sinh bài tư vấn chuyên sâu
-        advice_prompt = f"""
-Bạn là chuyên gia kỹ sư nông nghiệp. Hình ảnh này là {plant_name}.
-{f'Kết quả YOLO nhận diện: {yolo_text}' if yolo_text else ''}
- 
-Hãy tư vấn chi tiết cho nông dân BẰNG TIẾNG VIỆT gồm:
-1. 📌 **Đánh giá hiện trạng**: Tình trạng sức khỏe / giai đoạn sinh trưởng / bệnh hại.
-2. 🧪 **Biện pháp kỹ thuật**: Loại phân bón, tưới nước hoặc thuốc BVTV.
-3. ⚠️ **Lưu ý phòng ngừa**: Rủi ro tiếp theo.
+    g_model = get_working_gemini_model(api_key)
+    plant_name = get_clean_plant_name(g_model, pil_img)
+    p_lower = plant_name.lower()
+
+    if plant_name.startswith("Cây chưa xác định"):
+        return pil_img, f"❌ **Không nhận diện được cây:** {plant_name}\n\nVui lòng kiểm tra lại API key hoặc chọn ảnh rõ hơn."
+
+    # Đã bổ sung "mít" và "mit" vào danh sách hỗ trợ
+    supported_crops = ["lúa", "xoài", "mít", "lua", "xoai", "mit"]
+    is_supported = any(k in p_lower for k in supported_crops)
+
+    if not is_supported:
+        msg = f"🔍 **Kết quả nhận diện:** Đây là **{plant_name}**.\n\n"
+        msg += "⚠️ **THÔNG BÁO:** Hệ thống hiện tại hỗ trợ khoanh vùng và tư vấn chuyên sâu cho **Cây Lúa**, **Cây Xoài** và **Cây Mít**.\n"
+        msg += f"Do **{plant_name}** chưa nằm trong danh mục hỗ trợ nên hệ thống sẽ không thực hiện phân tích."
+        return pil_img, msg
+
+    # Nếu thuộc danh mục cây được hỗ trợ
+    annotated_img = pil_img
+    yolo_text = ""
+    best_match = None
+    highest_conf = -1.0
+
+    # Chạy qua các mô hình YOLO đã nạp
+    for m_key, model in LOADED_MODELS.items():
+        results = model.predict(pil_img, conf=0.35, imgsz=640)
+        boxes = results[0].boxes
+        if len(boxes) > 0:
+            top_box = sorted(boxes, key=lambda x: float(x.conf[0]), reverse=True)[0]
+            conf = float(top_box.conf[0])
+            if conf > highest_conf:
+                highest_conf = conf
+                best_match = {
+                    "m_key": m_key,
+                    "results": results,
+                    "box": top_box,
+                    "conf": conf
+                }
+
+    if best_match:
+        m_key = best_match["m_key"]
+        raw_label = LOADED_MODELS[m_key].names[int(best_match["box"].cls[0])]
+        conf = best_match["conf"]
+        annotated_img = best_match["results"][0].plot()[:, :, ::-1]
+
+        LUA_STAGE_MAP = {'sinh_truong': '🌱 Giai đoạn Mạ / Đẻ nhánh', 'tro_bong': '🌾 Giai đoạn Trỗ bông', 'chin': '🌾 Giai đoạn Lúa chín'}
+        XOAI_STAGE_MAP = {'sinh_truong': '🌿 Phát triển thân lá', 'ra_hoa': '🌸 Giai đoạn Ra hoa', 'phat_trien_qua': '🥭 Giai đoạn Quả lớn'}
+        MIT_STAGE_MAP = {'cua_ga': '🌸 Nhú cựa gà', 'trai_non': '🍈 Trái non', 'bao_trai': '🛍️ Đã bao túi', 'trai_chin': '🥭 Trái chín / Thu hoạch'}
+
+        if m_key == "lua_stage": pretty = LUA_STAGE_MAP.get(raw_label, raw_label)
+        elif m_key == "xoai_stage": pretty = XOAI_STAGE_MAP.get(raw_label, raw_label)
+        elif m_key == "mit_stage": pretty = MIT_STAGE_MAP.get(raw_label, raw_label)
+        else: pretty = raw_label
+
+        yolo_text = f"🎯 **Khoanh vùng bởi YOLO:** {pretty} (Độ tin cậy: {conf:.1%})\n"
+
+    # Gửi prompt cho Gemini sinh bản tư vấn
+    advice_prompt = f"""
+Bạn là một chuyên gia kỹ sư nông nghiệp giàu kinh nghiệm. 
+Hình ảnh phân tích là: {plant_name}.
+{f'Kết quả YOLO nhận diện được: {yolo_text}' if yolo_text else 'Chưa phát hiện vùng bất thường bằng YOLO.'}
+
+Hãy viết một bản tư vấn chi tiết BẰNG TIẾNG VIỆT giúp người dân chăm sóc cây trồng:
+1. 📌 **Đánh giá hiện trạng**: Nhận xét về tình trạng sức khỏe, giai đoạn phát triển hoặc mầm bệnh hiện tại.
+2. 🧪 **Biện pháp kỹ thuật**: Hướng dẫn cụ thể về loại phân bón, chế độ tưới nước hoặc thuốc BVTV phù hợp.
+3. ⚠️ **Lưu ý phòng ngừa**: Các rủi ro sâu bệnh hại tiếp theo (ví dụ với Mít lưu ý Xơ đen, Xì mủ) và cách xử lý sớm.
 """
-        adv_res = g_model.generate_content([pil_img, advice_prompt])
-        advice_text = adv_res.text if adv_res and adv_res.text else "Không sinh được bản tư vấn."
- 
-        header = f"🔍 **Kết quả nhận diện:** Đây là **{plant_name}**.\n\n"
-        if yolo_text:
-            header += yolo_text + "==================================================\n\n"
- 
-        return annotated_img, header + f"🤖 **TƯ VẤN CHUYÊN SÂU TỪ GEMINI LLM:**\n\n" + advice_text
- 
-    except Exception as e:
-        return pil_img, f"❌ **LỖI:** {str(e)}"
- 
+    adv_res = g_model.generate_content([pil_img, advice_prompt])
+    advice_text = adv_res.text if adv_res and adv_res.text else "Không sinh được nội dung tư vấn."
+
+    header = f"🔍 **Kết quả nhận diện:** Đây là **{plant_name}**.\n\n"
+    if yolo_text:
+        header += yolo_text + "\n---\n\n"
+
+    return annotated_img, header + "🤖 **TƯ VẤN CHUYÊN SÂU TỪ GEMINI LLM:**\n\n" + advice_text
+
 # ==========================================
-# 5. GIAO DIỆN GRADIO
+# 5. GIAO DIỆN STREAMLIT CHUẨN
 # ==========================================
-with gr.Blocks(theme=gr.themes.Soft(), title="YOLO + Gemini LLM") as demo:
-    gr.Markdown("<h2 style='text-align: center;'>🌾 ỨNG DỤNG YOLO & GEMINI LLM NHẬN DIỆN - TƯ VẤN CÂY TRỒNG</h2>")
- 
-    with gr.Row():
-        with gr.Column():
-            img_input = gr.Image(type="pil", label="Tải ảnh cây trồng lên")
-            api_key_input = gr.Textbox(
-                label="🔑 Gemini API Key (Bắt buộc)",
-                placeholder="Dán API Key Gemini vào đây...",
-                type="password"
-            )
-            btn_run = gr.Button("🚀 Phân Tích & Tư Vấn Chi Tiết", variant="primary")
- 
-        with gr.Column():
-            img_output = gr.Image(label="Hình ảnh phân tích")
-            txt_output = gr.Markdown(label="Kết quả từ AI")
- 
-    btn_run.click(
-        fn=process_analysis,
-        inputs=[img_input, api_key_input],
-        outputs=[img_output, txt_output]
-    )
- 
-demo.launch(share=True, debug=True)
+st.title("🌾 ỨNG DỤNG YOLO & GEMINI LLM NHẬN DIỆN - TƯ VẤN CÂY TRỒNG")
+st.write("Hệ thống nhận diện nông nghiệp thông minh hỗ trợ Cây Lúa, Cây Xoài và Cây Mít.")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    api_key_input = st.text_input("🔑 Gemini API Key (Bắt buộc)", type="password", placeholder="Dán Gemini API Key vào đây...")
+    uploaded_file = st.file_uploader("📸 Tải ảnh cây trồng lên", type=["jpg", "jpeg", "png", "webp"])
+    
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Ảnh bạn đã tải lên", use_container_width=True)
+
+with col2:
+    if uploaded_file and api_key_input:
+        if st.button("🚀 Phân Tích & Tư Vấn Chi Tiết", type="primary", use_container_width=True):
+            with st.spinner("⏳ Đang phân tích hình ảnh và khởi tạo bài tư vấn..."):
+                try:
+                    image = Image.open(uploaded_file)
+                    res_img, res_text = process_analysis(image, api_key_input)
+                    st.image(res_img, caption="Kết quả khoanh vùng / Phân tích", use_container_width=True)
+                    st.markdown(res_text)
+                except Exception as e:
+                    st.error(f"❌ Có lỗi xảy ra trong quá trình xử lý: {e}")
+    elif not api_key_input and uploaded_file:
+        st.warning("⚠️ Vui lòng nhập Gemini API Key ở cột bên trái để bắt đầu phân tích.")
